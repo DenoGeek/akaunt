@@ -1,0 +1,251 @@
+// Accountability Platform — Prisma schema
+// Ledger-based wallet, spaces, tasks, forgiveness
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SpaceMemberRole {
+  OWNER
+  MEMBER
+}
+
+enum LedgerEntryType {
+  PURCHASE
+  STAKE_LOCK
+  STAKE_RETURN
+  PENALTY
+  FORGIVENESS_REVERSAL
+}
+
+enum RecurrenceType {
+  DAILY
+  WEEKLY
+}
+
+enum TaskInstanceStatus {
+  PENDING
+  COMPLETED
+  MISSED
+  FORGIVEN
+}
+
+enum ForgivenessRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum ForgivenessVoteValue {
+  APPROVE
+  REJECT
+}
+
+model User {
+  id          String   @id @default(uuid())
+  clerkUserId String   @unique @map("clerk_user_id")
+  email       String?
+  timezone    String?  @default("UTC")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  wallet              Wallet?
+  ledgerEntries       LedgerEntry[]
+  spaceMembers        SpaceMember[]
+  taskInstances       TaskInstance[]
+  createdSpaces       Space[]              @relation("SpaceCreatedBy")
+  taskTemplates       TaskTemplate[]       @relation("TaskTemplateCreatedBy")
+  forgivenessUsages   ForgivenessUsage[]
+  forgivenessRequests ForgivenessRequest[] @relation("ForgivenessRequestedBy")
+  forgivenessVotes    ForgivenessVote[]
+
+  @@map("users")
+}
+
+model Wallet {
+  id        String   @id @default(uuid())
+  userId    String   @unique @map("user_id")
+  balance   Int      @default(0) // cached; true balance = sum(LedgerEntry.amount)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("wallets")
+}
+
+model LedgerEntry {
+  id             String          @id @default(uuid())
+  userId         String          @map("user_id")
+  spaceId        String?         @map("space_id")
+  taskInstanceId String?         @map("task_instance_id")
+  amount         Int // positive or negative
+  type           LedgerEntryType
+  createdAt      DateTime        @default(now()) @map("created_at")
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  space        Space?        @relation(fields: [spaceId], references: [id], onDelete: SetNull)
+  taskInstance TaskInstance? @relation(fields: [taskInstanceId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([userId, createdAt])
+  @@index([taskInstanceId])
+  @@map("ledger_entries")
+}
+
+model Space {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  createdById String   @map("created_by_id")
+  isPrivate   Boolean  @default(false) @map("is_private")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  createdBy         User               @relation("SpaceCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  rules             SpaceRules?
+  members           SpaceMember[]
+  taskTemplates     TaskTemplate[]
+  taskInstances     TaskInstance[]
+  ledgerEntries     LedgerEntry[]
+  forgivenessUsages ForgivenessUsage[]
+
+  @@map("spaces")
+}
+
+model SpaceMember {
+  id       String          @id @default(uuid())
+  spaceId  String          @map("space_id")
+  userId   String          @map("user_id")
+  role     SpaceMemberRole @default(MEMBER)
+  joinedAt DateTime        @default(now()) @map("joined_at")
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([spaceId, userId])
+  @@map("space_members")
+}
+
+model SpaceRules {
+  id                      String  @id @default(uuid())
+  spaceId                 String  @unique @map("space_id")
+  minStake                Int     @default(1) @map("min_stake")
+  strictDeadline          Boolean @default(true) @map("strict_deadline")
+  graceMinutes            Int     @default(0) @map("grace_minutes")
+  weeklyForgivenessTokens Int     @default(1) @map("weekly_forgiveness_tokens")
+  groupVoteEnabled        Boolean @default(false) @map("group_vote_enabled")
+  voteThresholdPercent    Int     @default(50) @map("vote_threshold_percent")
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+
+  @@map("space_rules")
+}
+
+model TaskTemplate {
+  id             String         @id @default(uuid())
+  spaceId        String         @map("space_id")
+  createdById    String         @map("created_by_id")
+  title          String
+  description    String?
+  recurrenceType RecurrenceType @map("recurrence_type")
+  weekday        Int? // 0-6 for weekly (0 = Sunday)
+  defaultStake   Int            @default(1) @map("default_stake")
+  active         Boolean        @default(true)
+  createdAt      DateTime       @default(now()) @map("created_at")
+
+  space     Space          @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  createdBy User           @relation("TaskTemplateCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  instances TaskInstance[]
+
+  @@map("task_templates")
+}
+
+model TaskInstance {
+  id             String             @id @default(uuid())
+  taskTemplateId String?            @map("task_template_id")
+  spaceId        String             @map("space_id")
+  userId         String             @map("user_id")
+  title          String
+  description    String?
+  dueAt          DateTime           @map("due_at")
+  stakeAmount    Int                @map("stake_amount")
+  status         TaskInstanceStatus @default(PENDING)
+  completedAt    DateTime?          @map("completed_at")
+  penaltyApplied Boolean            @default(false) @map("penalty_applied")
+  createdAt      DateTime           @default(now()) @map("created_at")
+
+  taskTemplate       TaskTemplate?       @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
+  space              Space               @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ledgerEntries      LedgerEntry[]
+  forgivenessRequest ForgivenessRequest?
+
+  @@index([status, dueAt])
+  @@index([spaceId])
+  @@index([spaceId, userId])
+  @@map("task_instances")
+}
+
+model ForgivenessUsage {
+  id         String @id @default(uuid())
+  userId     String @map("user_id")
+  spaceId    String @map("space_id")
+  weekNumber Int    @map("week_number")
+  year       Int
+  tokensUsed Int    @default(0) @map("tokens_used")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, spaceId, year, weekNumber])
+  @@map("forgiveness_usages")
+}
+
+model ForgivenessRequest {
+  id             String                   @id @default(uuid())
+  taskInstanceId String                   @unique @map("task_instance_id")
+  requestedById  String                   @map("requested_by_id")
+  status         ForgivenessRequestStatus @default(PENDING)
+  expiresAt      DateTime                 @map("expires_at")
+  createdAt      DateTime                 @default(now()) @map("created_at")
+
+  taskInstance TaskInstance      @relation(fields: [taskInstanceId], references: [id], onDelete: Cascade)
+  requestedBy  User              @relation("ForgivenessRequestedBy", fields: [requestedById], references: [id], onDelete: Cascade)
+  votes        ForgivenessVote[]
+
+  @@map("forgiveness_requests")
+}
+
+model ForgivenessVote {
+  id        String               @id @default(uuid())
+  requestId String               @map("request_id")
+  userId    String               @map("user_id")
+  vote      ForgivenessVoteValue
+  createdAt DateTime             @default(now()) @map("created_at")
+
+  request ForgivenessRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  user    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([requestId, userId])
+  @@map("forgiveness_votes")
+}
+
+model SpaceWeeklyStats {
+  id                String   @id @default(uuid())
+  spaceId           String   @map("space_id")
+  userId            String   @map("user_id")
+  year              Int
+  weekNumber        Int      @map("week_number")
+  completionPercent Float    @map("completion_percent")
+  coinsLost         Int      @default(0) @map("coins_lost")
+  forgivenessUsed   Int      @default(0) @map("forgiveness_used")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@unique([spaceId, userId, year, weekNumber])
+  @@map("space_weekly_stats")
+}
