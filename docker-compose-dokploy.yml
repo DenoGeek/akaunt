@@ -5,9 +5,6 @@ services:
     # build: .
     ports:
       - "3000:3000"
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://akaunt:akaunt_secret@db:5432/akaunt?schema=public
       - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=
