@@ -21,7 +21,7 @@ jobs:
         run: echo "${{ secrets.PROD_UI_ENV }}" > .env
 
       - name: Build API Docker image
-        run: docker build -t ghcr.io/${{ github.repository }}:akaunt-latest ./
+        run: docker build -t ghcr.io/denogeek/akaunt:akaunt-latest ./
 
       - name: Push API Docker image
-        run: docker push ghcr.io/${{ github.repository }}:akaunt-latest
+        run: docker push ghcr.io/denogeek/akaunt:akaunt-latest
