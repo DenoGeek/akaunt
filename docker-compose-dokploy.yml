@@ -3,8 +3,7 @@ services:
     image: ghcr.io/denogeek/akaunt:akaunt-latest
     networks:
       - dokploy-network
-    pull_policy:
-      always: true
+    pull_policy: always
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.app.rule=Host(`akaunt.neverest.co.ke`)"
