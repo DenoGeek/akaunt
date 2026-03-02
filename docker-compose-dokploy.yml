@@ -1,5 +1,5 @@
 services:
-  app:
+  akaunt-app:
     image: ghcr.io/denogeek/akaunt:akaunt-latest
     networks:
       - dokploy-network
