@@ -12,6 +12,8 @@ import { ForgivenessRequestsSection } from "./forgiveness-requests-section";
 import { DayCardsSection } from "./day-cards-section";
 import { SpaceTableView } from "./space-table-view";
 import { CopyInviteLink } from "@/components/copy-invite-link";
+import { SpaceSettingsProposalBanner } from "./space-settings-proposal-banner";
+import { FinesLedgerSection } from "./fines-ledger-section";
 
 export default async function SpacePage({
   params,
@@ -123,6 +125,18 @@ export default async function SpacePage({
     },
   });
 
+  const pendingSettingsProposal = await prisma.spaceSettingsProposal.findFirst({
+    where: { spaceId, status: "PENDING" },
+    include: {
+      createdBy: { select: { id: true, email: true } },
+      votes: { select: { userId: true, vote: true } },
+      space: { select: { id: true } },
+    },
+  });
+  const currentUserVote = pendingSettingsProposal?.votes.find((v) => v.userId === user.id);
+  const isOtherMember = pendingSettingsProposal && member.space.members.some((m) => m.userId === user.id) && pendingSettingsProposal.createdById !== user.id;
+  const showSettingsBanner = pendingSettingsProposal && isOtherMember && !currentUserVote;
+
   const viewSwitcher = (
     <div className="flex gap-1 items-center bg-zinc-100 dark:bg-zinc-800/60 rounded-lg p-1">
       <Link
@@ -180,7 +194,15 @@ export default async function SpacePage({
           <Link href="/dashboard/spaces" className="text-sm text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-400 mb-1 block">
             ← Spaces
           </Link>
-          <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">{member.space.name}</h1>
+          <div className="flex items-center gap-3 flex-wrap">
+            <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">{member.space.name}</h1>
+            <Link
+              href={`/dashboard/spaces/${spaceId}/settings`}
+              className="text-sm text-violet-600 dark:text-violet-400 hover:underline"
+            >
+              Settings
+            </Link>
+          </div>
           {member.space.description && (
             <p className="text-zinc-500 text-sm mt-1">{member.space.description}</p>
           )}
@@ -194,6 +216,14 @@ export default async function SpacePage({
           {periodSwitcher}
         </div>
       </div>
+
+      {showSettingsBanner && pendingSettingsProposal && (
+        <SpaceSettingsProposalBanner
+          proposal={pendingSettingsProposal}
+          currentUserId={user.id}
+          hasVoted={!!currentUserVote}
+        />
+      )}
 
       {isTableView ? (
         <SpaceTableView
@@ -256,6 +286,14 @@ export default async function SpacePage({
           Add this week&apos;s tasks
         </Link>
       </div>
+
+      <FinesLedgerSection
+        spaceId={spaceId}
+        currentUserId={user.id}
+        currencySymbol={member.space.rules?.currencySymbol ?? "$"}
+        useLedgerForFines={member.space.rules?.useLedgerForFines ?? false}
+        members={member.space.members.map((m) => ({ userId: m.userId, user: m.user }))}
+      />
 
       {/* Invite link */}
       <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/40 p-5">

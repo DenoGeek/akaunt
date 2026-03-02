@@ -1,9 +1,10 @@
 import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
-import { ensureUserSynced } from "@/lib/auth";
+import { ensureUserSynced, getUserByClerkId } from "@/lib/auth";
 import Link from "next/link";
 import { UserButton } from "@clerk/nextjs";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { prisma } from "@/lib/prisma";
 
 export default async function DashboardLayout({
   children,
@@ -15,6 +16,10 @@ export default async function DashboardLayout({
 
   const email = (sessionClaims?.email as string) ?? null;
   await ensureUserSynced(userId, email);
+  const user = await getUserByClerkId(userId);
+  const unreadCount = user
+    ? await prisma.notification.count({ where: { userId: user.id, readAt: null } })
+    : 0;
 
   return (
     <div className="min-h-screen flex flex-col bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100">
@@ -48,6 +53,17 @@ export default async function DashboardLayout({
               className="rounded-lg px-3 py-1.5 text-sm font-medium text-violet-600 hover:text-violet-700 hover:bg-violet-50 dark:text-violet-400 dark:hover:text-violet-300 dark:hover:bg-violet-500/10 transition-colors"
             >
               + New space
+            </Link>
+            <Link
+              href="/dashboard/notifications"
+              className="relative rounded-lg px-3 py-1.5 text-sm font-medium text-zinc-600 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800/70 transition-colors"
+            >
+              Notifications
+              {unreadCount > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-bold text-white">
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
             </Link>
           </nav>
 

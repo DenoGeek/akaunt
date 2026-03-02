@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { getUserByClerkId } from "@/lib/auth";
 import { stakeReturn } from "@/lib/ledger";
+import { createNotificationsForMembers } from "@/lib/notifications";
 import { z } from "zod";
 
 const createSpaceSchema = z.object({
@@ -17,6 +18,34 @@ const createSpaceSchema = z.object({
   weeklyForgivenessTokens: z.number().int().min(0),
   groupVoteEnabled: z.boolean(),
   voteThresholdPercent: z.number().int().min(0).max(100),
+  timezone: z.string().min(1).optional(),
+  currencySymbol: z.string().max(10).optional(),
+  useLedgerForFines: z.boolean().optional(),
+});
+
+/** Snapshot of SpaceRules for proposals */
+export type SpaceRulesSnapshot = {
+  minStake: number;
+  strictDeadline: boolean;
+  graceMinutes: number;
+  weeklyForgivenessTokens: number;
+  groupVoteEnabled: boolean;
+  voteThresholdPercent: number;
+  timezone: string;
+  currencySymbol: string;
+  useLedgerForFines: boolean;
+};
+
+const spaceSettingsSchema = z.object({
+  minStake: z.number().int().min(0),
+  strictDeadline: z.boolean(),
+  graceMinutes: z.number().int().min(0),
+  weeklyForgivenessTokens: z.number().int().min(0),
+  groupVoteEnabled: z.boolean(),
+  voteThresholdPercent: z.number().int().min(0).max(100),
+  timezone: z.string().min(1),
+  currencySymbol: z.string().max(10),
+  useLedgerForFines: z.boolean(),
 });
 
 export type CreateSpaceResult =
@@ -58,6 +87,9 @@ export async function createSpace(formData: FormData): Promise<CreateSpaceResult
           weeklyForgivenessTokens: data.weeklyForgivenessTokens,
           groupVoteEnabled: data.groupVoteEnabled,
           voteThresholdPercent: data.voteThresholdPercent,
+          timezone: data.timezone ?? "Africa/Nairobi",
+          currencySymbol: data.currencySymbol ?? "$",
+          useLedgerForFines: data.useLedgerForFines ?? false,
         },
       },
       members: {
@@ -128,12 +160,17 @@ export async function leaveSpace(spaceId: string): Promise<{ ok: true } | { ok: 
     },
   });
   for (const inst of futurePending) {
-    await stakeReturn({
-      userId: user.id,
-      amount: inst.stakeAmount,
-      spaceId,
-      taskInstanceId: inst.id,
+    const hadStakeLock = await prisma.ledgerEntry.findFirst({
+      where: { taskInstanceId: inst.id, type: "STAKE_LOCK" },
     });
+    if (hadStakeLock) {
+      await stakeReturn({
+        userId: user.id,
+        amount: inst.stakeAmount,
+        spaceId,
+        taskInstanceId: inst.id,
+      });
+    }
     await prisma.taskInstance.delete({ where: { id: inst.id } });
   }
   await prisma.spaceMember.delete({
@@ -143,5 +180,183 @@ export async function leaveSpace(spaceId: string): Promise<{ ok: true } | { ok: 
   revalidatePath("/dashboard");
   revalidatePath("/dashboard/spaces");
   revalidatePath(`/dashboard/spaces/${spaceId}`);
+  return { ok: true };
+}
+
+export type RequestSpaceSettingsChangeResult =
+  | { ok: true; applied: true }
+  | { ok: true; applied: false; proposalId: string; message: string }
+  | { ok: false; error: string };
+
+export async function requestSpaceSettingsChange(
+  spaceId: string,
+  formData: FormData
+): Promise<RequestSpaceSettingsChangeResult> {
+  const { userId } = await auth();
+  if (!userId) return { ok: false, error: "Not authenticated" };
+
+  const user = await getUserByClerkId(userId);
+  if (!user) return { ok: false, error: "User not found" };
+
+  const member = await prisma.spaceMember.findUnique({
+    where: { spaceId_userId: { spaceId, userId: user.id } },
+  });
+  if (!member) return { ok: false, error: "Not a member of this space" };
+
+  const rules = await prisma.spaceRules.findUnique({ where: { spaceId } });
+  if (!rules) return { ok: false, error: "Space has no rules" };
+
+  const parsed = spaceSettingsSchema.safeParse({
+    minStake: Number(formData.get("minStake")) ?? rules.minStake,
+    strictDeadline: formData.get("strictDeadline") === "on",
+    graceMinutes: Number(formData.get("graceMinutes")) ?? rules.graceMinutes,
+    weeklyForgivenessTokens: Number(formData.get("weeklyForgivenessTokens")) ?? rules.weeklyForgivenessTokens,
+    groupVoteEnabled: formData.get("groupVoteEnabled") === "on",
+    voteThresholdPercent: Number(formData.get("voteThresholdPercent")) ?? rules.voteThresholdPercent,
+    timezone: (formData.get("timezone") as string) || rules.timezone,
+    currencySymbol: (formData.get("currencySymbol") as string) || rules.currencySymbol,
+    useLedgerForFines: formData.get("useLedgerForFines") === "on",
+  });
+  if (!parsed.success) return { ok: false, error: parsed.error.message };
+
+  const snapshot: SpaceRulesSnapshot = parsed.data;
+  const memberCount = await prisma.spaceMember.count({ where: { spaceId } });
+
+  if (memberCount <= 1) {
+    await prisma.spaceRules.update({
+      where: { spaceId },
+      data: {
+        minStake: snapshot.minStake,
+        strictDeadline: snapshot.strictDeadline,
+        graceMinutes: snapshot.graceMinutes,
+        weeklyForgivenessTokens: snapshot.weeklyForgivenessTokens,
+        groupVoteEnabled: snapshot.groupVoteEnabled,
+        voteThresholdPercent: snapshot.voteThresholdPercent,
+        timezone: snapshot.timezone,
+        currencySymbol: snapshot.currencySymbol,
+        useLedgerForFines: snapshot.useLedgerForFines,
+      },
+    });
+    revalidatePath("/dashboard/spaces");
+    revalidatePath(`/dashboard/spaces/${spaceId}`);
+    return { ok: true, applied: true };
+  }
+
+  await prisma.spaceSettingsProposal.updateMany({
+    where: { spaceId, status: "PENDING" },
+    data: { status: "SUPERSEDED" },
+  });
+
+  const proposal = await prisma.spaceSettingsProposal.create({
+    data: {
+      spaceId,
+      createdById: user.id,
+      status: "PENDING",
+      settingsJson: snapshot as unknown as object,
+    },
+  });
+
+  await prisma.spaceSettingsVote.create({
+    data: { proposalId: proposal.id, userId: user.id, vote: "APPROVE" },
+  });
+
+  const otherMemberIds = await prisma.spaceMember.findMany({
+    where: { spaceId },
+    select: { userId: true },
+  }).then((rows) => rows.filter((r) => r.userId !== user.id).map((r) => r.userId));
+  if (otherMemberIds.length > 0) {
+    await createNotificationsForMembers({
+      memberIds: otherMemberIds,
+      type: "SETTINGS_VOTE_NEEDED",
+      spaceId,
+      relatedId: proposal.id,
+    });
+  }
+
+  revalidatePath("/dashboard/spaces");
+  revalidatePath(`/dashboard/spaces/${spaceId}`);
+  return {
+    ok: true,
+    applied: false,
+    proposalId: proposal.id,
+    message: `Changes submitted for approval from ${memberCount - 1} other member(s).`,
+  };
+}
+
+export type VoteOnSpaceSettingsResult = { ok: true } | { ok: false; error: string };
+
+export async function voteOnSpaceSettings(
+  proposalId: string,
+  vote: "APPROVE" | "REJECT"
+): Promise<VoteOnSpaceSettingsResult> {
+  const { userId } = await auth();
+  if (!userId) return { ok: false, error: "Not authenticated" };
+
+  const user = await getUserByClerkId(userId);
+  if (!user) return { ok: false, error: "User not found" };
+
+  const proposal = await prisma.spaceSettingsProposal.findUnique({
+    where: { id: proposalId },
+    include: {
+      space: { include: { members: { select: { userId: true } }, rules: true } },
+      votes: true,
+    },
+  });
+  if (!proposal) return { ok: false, error: "Proposal not found" };
+  if (proposal.status !== "PENDING") return { ok: false, error: "Proposal is no longer pending" };
+
+  const isMember = proposal.space.members.some((m) => m.userId === user.id);
+  if (!isMember) return { ok: false, error: "Not a member of this space" };
+
+  await prisma.spaceSettingsVote.upsert({
+    where: { proposalId_userId: { proposalId, userId: user.id } },
+    create: { proposalId, userId: user.id, vote: vote === "APPROVE" ? "APPROVE" : "REJECT" },
+    update: { vote: vote === "APPROVE" ? "APPROVE" : "REJECT" },
+  });
+
+  const otherMemberIds = proposal.space.members.filter((m) => m.userId !== proposal.createdById).map((m) => m.userId);
+  const votes = await prisma.spaceSettingsVote.findMany({ where: { proposalId } });
+  const rejectByOther = votes.find((v) => v.vote === "REJECT" && otherMemberIds.includes(v.userId));
+  if (rejectByOther) {
+    await prisma.spaceSettingsProposal.update({
+      where: { id: proposalId },
+      data: { status: "CANCELLED" },
+    });
+    revalidatePath("/dashboard/spaces");
+    revalidatePath(`/dashboard/spaces/${proposal.spaceId}`);
+    return { ok: true };
+  }
+
+  const approvedByOther = otherMemberIds.filter((oid) => votes.some((v) => v.userId === oid && v.vote === "APPROVE"));
+  if (approvedByOther.length < otherMemberIds.length) {
+    revalidatePath("/dashboard/spaces");
+    revalidatePath(`/dashboard/spaces/${proposal.spaceId}`);
+    return { ok: true };
+  }
+
+  const snapshot = proposal.settingsJson as unknown as SpaceRulesSnapshot;
+  await prisma.$transaction([
+    prisma.spaceRules.update({
+      where: { spaceId: proposal.spaceId },
+      data: {
+        minStake: snapshot.minStake,
+        strictDeadline: snapshot.strictDeadline,
+        graceMinutes: snapshot.graceMinutes,
+        weeklyForgivenessTokens: snapshot.weeklyForgivenessTokens,
+        groupVoteEnabled: snapshot.groupVoteEnabled,
+        voteThresholdPercent: snapshot.voteThresholdPercent,
+        timezone: snapshot.timezone,
+        currencySymbol: snapshot.currencySymbol,
+        useLedgerForFines: snapshot.useLedgerForFines,
+      },
+    }),
+    prisma.spaceSettingsProposal.update({
+      where: { id: proposalId },
+      data: { status: "APPLIED", appliedAt: new Date() },
+    }),
+  ]);
+
+  revalidatePath("/dashboard/spaces");
+  revalidatePath(`/dashboard/spaces/${proposal.spaceId}`);
   return { ok: true };
 }

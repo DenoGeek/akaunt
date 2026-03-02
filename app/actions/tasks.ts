@@ -5,6 +5,15 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { getUserByClerkId } from "@/lib/auth";
 import { stakeLock, stakeReturn, getBalance } from "@/lib/ledger";
+import { createNotificationsForMembers } from "@/lib/notifications";
+import type { SpaceRules, TaskTemplate } from "@prisma/client";
+
+function useLedgerForFines(rules: SpaceRules | null, template: Pick<TaskTemplate, "ledgerModeOverride"> | null): boolean {
+  if (!rules) return false;
+  if (template?.ledgerModeOverride === "LEDGER") return true;
+  if (template?.ledgerModeOverride === "STAKE") return false;
+  return rules.useLedgerForFines;
+}
 import { z } from "zod";
 import { startOfDay, endOfDay, addDays, isBefore, startOfWeek, endOfWeek, addWeeks } from "date-fns";
 
@@ -45,15 +54,18 @@ export async function createTaskTemplate(formData: FormData): Promise<CreateTask
   });
   if (!member) return { ok: false, error: "Not a member of this space" };
 
-  const balance = await getBalance(user.id);
-  if (balance < stake) return { ok: false, error: "Insufficient balance" };
-
   const space = await prisma.space.findUnique({
     where: { id: spaceId },
     include: { rules: true },
   });
   if (!space?.rules) return { ok: false, error: "Space not found" };
   if (stake < space.rules.minStake) return { ok: false, error: `Minimum stake is ${space.rules.minStake}` };
+
+  const ledgerMode = useLedgerForFines(space.rules, null);
+  if (!ledgerMode) {
+    const balance = await getBalance(user.id);
+    if (balance < stake) return { ok: false, error: "Insufficient balance" };
+  }
 
   const now = new Date();
   const template = await prisma.taskTemplate.create({
@@ -91,19 +103,21 @@ export async function createTaskTemplate(formData: FormData): Promise<CreateTask
         stakeAmount: stake,
       },
     });
-    const lockResult = await stakeLock({
-      userId,
-      amount: stake,
-      spaceId,
-      taskInstanceId: instance.id,
-    });
-    if (!lockResult.ok) {
-      await prisma.taskInstance.delete({ where: { id: instance.id } });
-      await prisma.taskTemplate.update({
-        where: { id: template.id },
-        data: { active: false },
+    if (!ledgerMode) {
+      const lockResult = await stakeLock({
+        userId,
+        amount: stake,
+        spaceId,
+        taskInstanceId: instance.id,
       });
-      return { ok: false, error: lockResult.error };
+      if (!lockResult.ok) {
+        await prisma.taskInstance.delete({ where: { id: instance.id } });
+        await prisma.taskTemplate.update({
+          where: { id: template.id },
+          data: { active: false },
+        });
+        return { ok: false, error: lockResult.error };
+      }
     }
   }
 
@@ -142,12 +156,33 @@ export async function completeTask(taskInstanceId: string): Promise<{ ok: true }
     where: { id: taskInstanceId },
     data: { status: "COMPLETED", completedAt: now },
   });
-  await stakeReturn({
-    userId: user.id,
-    amount: instance.stakeAmount,
-    spaceId: instance.spaceId,
-    taskInstanceId,
+
+  const spaceMembers = await prisma.spaceMember.findMany({
+    where: { spaceId: instance.spaceId },
+    select: { userId: true },
   });
+  const otherMemberIds = spaceMembers.filter((m) => m.userId !== user.id).map((m) => m.userId);
+  if (otherMemberIds.length > 0) {
+    await createNotificationsForMembers({
+      memberIds: otherMemberIds,
+      type: "TASK_COMPLETED_BY_MEMBER",
+      spaceId: instance.spaceId,
+      relatedId: taskInstanceId,
+    });
+  }
+
+  // Only return stake if we had locked it (stake mode); ledger-mode tasks have no STAKE_LOCK
+  const hadStakeLock = await prisma.ledgerEntry.findFirst({
+    where: { taskInstanceId, type: "STAKE_LOCK" },
+  });
+  if (hadStakeLock) {
+    await stakeReturn({
+      userId: user.id,
+      amount: instance.stakeAmount,
+      spaceId: instance.spaceId,
+      taskInstanceId,
+    });
+  }
 
   revalidatePath(`/dashboard/spaces/${instance.spaceId}`);
   return { ok: true };
@@ -193,9 +228,12 @@ export async function createTodayTasksBatch(
     if (r.stake < minStake) return { ok: false, error: `Minimum stake is ${minStake} coins` };
   }
 
-  const totalStake = valid.reduce((s, r) => s + r.stake, 0);
-  const balance = await getBalance(user.id);
-  if (balance < totalStake) return { ok: false, error: "Insufficient balance" };
+  const ledgerMode = space.rules.useLedgerForFines;
+  if (!ledgerMode) {
+    const totalStake = valid.reduce((s, r) => s + r.stake, 0);
+    const balance = await getBalance(user.id);
+    if (balance < totalStake) return { ok: false, error: "Insufficient balance" };
+  }
 
   const now = new Date();
   const dueAt = endOfDay(now);
@@ -210,15 +248,17 @@ export async function createTodayTasksBatch(
         stakeAmount: r.stake,
       },
     });
-    const lockResult = await stakeLock({
-      userId: user.id,
-      amount: r.stake,
-      spaceId,
-      taskInstanceId: instance.id,
-    });
-    if (!lockResult.ok) {
-      await prisma.taskInstance.delete({ where: { id: instance.id } });
-      return { ok: false, error: lockResult.error };
+    if (!ledgerMode) {
+      const lockResult = await stakeLock({
+        userId: user.id,
+        amount: r.stake,
+        spaceId,
+        taskInstanceId: instance.id,
+      });
+      if (!lockResult.ok) {
+        await prisma.taskInstance.delete({ where: { id: instance.id } });
+        return { ok: false, error: lockResult.error };
+      }
     }
   }
 
@@ -256,9 +296,12 @@ export async function createWeekTasksBatch(
     if (r.stake < minStake) return { ok: false, error: `Minimum stake is ${minStake} coins` };
   }
 
-  const totalStake = valid.reduce((s, r) => s + r.stake, 0);
-  const balance = await getBalance(user.id);
-  if (balance < totalStake) return { ok: false, error: "Insufficient balance" };
+  const ledgerMode = space.rules.useLedgerForFines;
+  if (!ledgerMode) {
+    const totalStake = valid.reduce((s, r) => s + r.stake, 0);
+    const balance = await getBalance(user.id);
+    if (balance < totalStake) return { ok: false, error: "Insufficient balance" };
+  }
 
   const now = new Date();
   const weekStart = startOfWeek(now, { weekStartsOn: 0 });
@@ -278,15 +321,17 @@ export async function createWeekTasksBatch(
         stakeAmount: r.stake,
       },
     });
-    const lockResult = await stakeLock({
-      userId: user.id,
-      amount: r.stake,
-      spaceId,
-      taskInstanceId: instance.id,
-    });
-    if (!lockResult.ok) {
-      await prisma.taskInstance.delete({ where: { id: instance.id } });
-      return { ok: false, error: lockResult.error };
+    if (!ledgerMode) {
+      const lockResult = await stakeLock({
+        userId: user.id,
+        amount: r.stake,
+        spaceId,
+        taskInstanceId: instance.id,
+      });
+      if (!lockResult.ok) {
+        await prisma.taskInstance.delete({ where: { id: instance.id } });
+        return { ok: false, error: lockResult.error };
+      }
     }
   }
 

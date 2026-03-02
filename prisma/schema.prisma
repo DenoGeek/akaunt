@@ -21,6 +21,8 @@ enum LedgerEntryType {
   STAKE_RETURN
   PENALTY
   FORGIVENESS_REVERSAL
+  FINE
+  FINE_SETTLEMENT
 }
 
 enum RecurrenceType {
@@ -47,6 +49,28 @@ enum ForgivenessVoteValue {
   REJECT
 }
 
+enum SpaceSettingsProposalStatus {
+  PENDING
+  APPLIED
+  CANCELLED
+  SUPERSEDED
+}
+
+enum LedgerSettlementProposalStatus {
+  PENDING
+  APPLIED
+  REJECTED
+  SUPERSEDED
+}
+
+enum NotificationType {
+  FORGIVENESS_VOTE_NEEDED
+  SETTLEMENT_CONFIRM_NEEDED
+  SETTINGS_VOTE_NEEDED
+  TASK_COMPLETED_BY_MEMBER
+  TASK_FINED_OR_POINTS_LOST
+}
+
 model User {
   id          String   @id @default(uuid())
   clerkUserId String   @unique @map("clerk_user_id")
@@ -63,6 +87,12 @@ model User {
   forgivenessUsages   ForgivenessUsage[]
   forgivenessRequests ForgivenessRequest[] @relation("ForgivenessRequestedBy")
   forgivenessVotes    ForgivenessVote[]
+  notifications       Notification[]
+  spaceSettingsProposalsCreated SpaceSettingsProposal[]
+  spaceSettingsVotes  SpaceSettingsVote[]
+  ledgerSettlementProposalsCreated LedgerSettlementProposal[]
+  ledgerSettlementProposalsTarget  LedgerSettlementProposal[] @relation("LedgerSettlementTargetUser")
+  ledgerSettlementConfirmations LedgerSettlementConfirmation[]
 
   @@map("users")
 }
@@ -106,13 +136,16 @@ model Space {
   isPrivate   Boolean  @default(false) @map("is_private")
   createdAt   DateTime @default(now()) @map("created_at")
 
-  createdBy         User               @relation("SpaceCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
-  rules             SpaceRules?
-  members           SpaceMember[]
-  taskTemplates     TaskTemplate[]
-  taskInstances     TaskInstance[]
-  ledgerEntries     LedgerEntry[]
-  forgivenessUsages ForgivenessUsage[]
+  createdBy              User                     @relation("SpaceCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  rules                  SpaceRules?
+  members                SpaceMember[]
+  taskTemplates          TaskTemplate[]
+  taskInstances          TaskInstance[]
+  ledgerEntries          LedgerEntry[]
+  forgivenessUsages      ForgivenessUsage[]
+  settingsProposals      SpaceSettingsProposal[]
+  ledgerSettlementProposals LedgerSettlementProposal[]
+  notifications          Notification[]
 
   @@map("spaces")
 }
@@ -140,23 +173,112 @@ model SpaceRules {
   weeklyForgivenessTokens Int     @default(1) @map("weekly_forgiveness_tokens")
   groupVoteEnabled        Boolean @default(false) @map("group_vote_enabled")
   voteThresholdPercent    Int     @default(50) @map("vote_threshold_percent")
+  timezone                String  @default("Africa/Nairobi") @map("timezone")
+  currencySymbol          String  @default("$") @map("currency_symbol")
+  useLedgerForFines      Boolean @default(false) @map("use_ledger_for_fines")
 
   space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
 
   @@map("space_rules")
 }
 
+model SpaceSettingsProposal {
+  id           String                     @id @default(uuid())
+  spaceId      String                     @map("space_id")
+  createdById  String                     @map("created_by_id")
+  status       SpaceSettingsProposalStatus @default(PENDING)
+  settingsJson Json                       @map("settings_json")
+  createdAt    DateTime                   @default(now()) @map("created_at")
+  appliedAt    DateTime?                  @map("applied_at")
+
+  space     Space               @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  createdBy User                @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  votes     SpaceSettingsVote[]
+
+  @@map("space_settings_proposals")
+}
+
+model SpaceSettingsVote {
+  id         String               @id @default(uuid())
+  proposalId String               @map("proposal_id")
+  userId     String               @map("user_id")
+  vote       ForgivenessVoteValue
+  createdAt  DateTime             @default(now()) @map("created_at")
+
+  proposal SpaceSettingsProposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  user     User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([proposalId, userId])
+  @@map("space_settings_votes")
+}
+
+model LedgerSettlementProposal {
+  id           String                         @id @default(uuid())
+  spaceId      String                         @map("space_id")
+  createdById  String                         @map("created_by_id")
+  targetUserId String                         @map("target_user_id")
+  amount       Int
+  reason       String?
+  status       LedgerSettlementProposalStatus @default(PENDING)
+  createdAt    DateTime                      @default(now()) @map("created_at")
+  appliedAt    DateTime?                      @map("applied_at")
+
+  space         Space                        @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  createdBy     User                         @relation(fields: [createdById], references: [id], onDelete: Cascade)
+  targetUser    User                         @relation("LedgerSettlementTargetUser", fields: [targetUserId], references: [id], onDelete: Cascade)
+  confirmations LedgerSettlementConfirmation[]
+
+  @@map("ledger_settlement_proposals")
+}
+
+model LedgerSettlementConfirmation {
+  id         String   @id @default(uuid())
+  proposalId String   @map("proposal_id")
+  userId     String   @map("user_id")
+  confirmed  Boolean  @default(true)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  proposal LedgerSettlementProposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  user     User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([proposalId, userId])
+  @@map("ledger_settlement_confirmations")
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String           @map("user_id")
+  type      NotificationType
+  spaceId   String?          @map("space_id")
+  relatedId String?          @map("related_id")
+  readAt    DateTime?        @map("read_at")
+  createdAt DateTime         @default(now()) @map("created_at")
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  space Space? @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+enum LedgerMode {
+  STAKE
+  LEDGER
+}
+
 model TaskTemplate {
-  id             String         @id @default(uuid())
-  spaceId        String         @map("space_id")
-  createdById    String         @map("created_by_id")
-  title          String
-  description    String?
-  recurrenceType RecurrenceType @map("recurrence_type")
-  weekday        Int? // 0-6 for weekly (0 = Sunday)
-  defaultStake   Int            @default(1) @map("default_stake")
-  active         Boolean        @default(true)
-  createdAt      DateTime       @default(now()) @map("created_at")
+  id                String       @id @default(uuid())
+  spaceId           String       @map("space_id")
+  createdById       String       @map("created_by_id")
+  title             String
+  description       String?
+  recurrenceType    RecurrenceType @map("recurrence_type")
+  weekday           Int? // 0-6 for weekly (0 = Sunday)
+  defaultStake      Int          @default(1) @map("default_stake")
+  active            Boolean      @default(true)
+  ledgerModeOverride LedgerMode? @map("ledger_mode_override") // null = use space default
+  createdAt         DateTime     @default(now()) @map("created_at")
 
   space     Space          @relation(fields: [spaceId], references: [id], onDelete: Cascade)
   createdBy User           @relation("TaskTemplateCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)

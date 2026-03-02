@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { getUserByClerkId } from "@/lib/auth";
 import { forgivenessReversal } from "@/lib/ledger";
+import { createNotificationsForMembers } from "@/lib/notifications";
 import { getWeek, getWeekYear } from "date-fns";
 
 export type ForgivenessResult = { ok: true } | { ok: false; error: string };
@@ -114,7 +115,7 @@ export async function requestGroupForgiveness(taskInstanceId: string): Promise<F
 
   const space = await prisma.space.findUnique({
     where: { id: instance.spaceId },
-    include: { rules: true },
+    include: { rules: true, members: { select: { userId: true } } },
   });
   if (!space?.rules?.groupVoteEnabled) return { ok: false, error: "Group vote not enabled" };
 
@@ -124,7 +125,7 @@ export async function requestGroupForgiveness(taskInstanceId: string): Promise<F
   if (existing) return { ok: false, error: "Request already exists" };
 
   const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000);
-  await prisma.forgivenessRequest.create({
+  const request = await prisma.forgivenessRequest.create({
     data: {
       taskInstanceId,
       requestedById: user.id,
@@ -132,6 +133,16 @@ export async function requestGroupForgiveness(taskInstanceId: string): Promise<F
       expiresAt,
     },
   });
+
+  const otherMemberIds = space.members.filter((m) => m.userId !== user.id).map((m) => m.userId);
+  if (otherMemberIds.length > 0) {
+    await createNotificationsForMembers({
+      memberIds: otherMemberIds,
+      type: "FORGIVENESS_VOTE_NEEDED",
+      spaceId: instance.spaceId,
+      relatedId: request.id,
+    });
+  }
 
   revalidatePath(`/dashboard/spaces/${instance.spaceId}`);
   return { ok: true };
