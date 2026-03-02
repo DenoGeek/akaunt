@@ -6,8 +6,9 @@ services:
     pull_policy: always
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.akauntapp.rule=Host(`akaunt.neverest.co.ke`)"
-      - "traefik.http.services.akauntapp.loadbalancer.server.port=3000"
+      - "traefik.http.routers.akaunt-app.rule=Host(`akaunt.neverest.co.ke`)"
+      - "traefik.http.routers.akaunt-app.entrypoints=websecure"
+      - "traefik.http.routers.akaunt-app.tls.certresolver=letsencrypt"
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
