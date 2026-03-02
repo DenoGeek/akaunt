@@ -6,12 +6,12 @@ import { useState } from "react";
 import { UserButton } from "@clerk/nextjs";
 import { ThemeToggle } from "@/components/theme-toggle";
 
-const navLinks = [
+const navLinks: { href: string; label: string; badge?: boolean }[] = [
   { href: "/dashboard", label: "Home" },
   { href: "/dashboard/spaces", label: "Spaces" },
   { href: "/dashboard/spaces/new", label: "+ New space" },
   { href: "/dashboard/notifications", label: "Notifications", badge: true },
-] as const;
+];
 
 function NavLink({
   href,
