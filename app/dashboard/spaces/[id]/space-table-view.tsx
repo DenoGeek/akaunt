@@ -1,16 +1,18 @@
 import { completeTaskAction } from "@/app/actions/tasks";
 import { usePersonalForgivenessAction, requestGroupForgivenessAction } from "@/app/actions/forgiveness";
-import type { TaskInstance, SpaceRules } from "@prisma/client";
+import type { TaskInstance, SpaceRules, User } from "@prisma/client";
 import { format } from "date-fns";
 
 export function SpaceTableView({
   instances,
   rules,
   currentUserId,
+  members,
 }: {
   instances: TaskInstance[];
   rules: SpaceRules | null;
   currentUserId: string;
+  members: { userId: string; user: Pick<User, "email" | "clerkUserId"> }[];
 }) {
   return (
     <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-800">
@@ -18,6 +20,7 @@ export function SpaceTableView({
         <thead className="bg-zinc-50 dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 border-b border-zinc-200 dark:border-zinc-800">
           <tr>
             <th className="px-4 py-3 font-medium">Title</th>
+            <th className="px-4 py-3 font-medium">Owner</th>
             <th className="px-4 py-3 font-medium">Due</th>
             <th className="px-4 py-3 font-medium">Stake</th>
             <th className="px-4 py-3 font-medium">Status</th>
@@ -28,6 +31,14 @@ export function SpaceTableView({
           {instances.map((inst) => (
             <tr key={inst.id} className="bg-white dark:bg-zinc-900/50 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors">
               <td className="px-4 py-3 text-zinc-900 dark:text-zinc-100">{inst.title}</td>
+              <td className="px-4 py-3 text-zinc-500">
+                {(() => {
+                  if (inst.userId === currentUserId) return "You";
+                  const owner = members.find((m) => m.userId === inst.userId);
+                  if (!owner) return "Member";
+                  return owner.user.email ?? owner.user.clerkUserId;
+                })()}
+              </td>
               <td className="px-4 py-3 text-zinc-500">{format(inst.dueAt, "PPp")}</td>
               <td className="px-4 py-3 text-zinc-500">{inst.stakeAmount} coins</td>
               <td className="px-4 py-3">
