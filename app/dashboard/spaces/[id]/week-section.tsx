@@ -1,5 +1,5 @@
 import { format } from "date-fns";
-import type { TaskInstance } from "@prisma/client";
+import type { TaskInstance, User } from "@prisma/client";
 
 function groupByDay(instances: TaskInstance[]) {
   const map = new Map<string, TaskInstance[]>();
@@ -15,9 +15,13 @@ function groupByDay(instances: TaskInstance[]) {
 export function SpaceWeekSection({
   instances,
   spaceId,
+  members,
+  currentUserId,
 }: {
   instances: TaskInstance[];
   spaceId: string;
+  members: { userId: string; user: Pick<User, "email" | "clerkUserId"> }[];
+  currentUserId: string;
 }) {
   const completed = instances.filter((i) => i.status === "COMPLETED").length;
   const total = instances.length;
@@ -48,7 +52,17 @@ export function SpaceWeekSection({
                   key={inst.id}
                   className="flex items-center justify-between rounded-lg border border-zinc-200 dark:border-zinc-800/80 bg-white dark:bg-transparent px-3 py-2 text-sm"
                 >
-                  <span className="text-zinc-700 dark:text-zinc-300">{inst.title}</span>
+                  <div className="flex flex-col">
+                    <span className="text-zinc-700 dark:text-zinc-300">{inst.title}</span>
+                    <span className="text-[11px] text-zinc-500">
+                      {(() => {
+                        if (inst.userId === currentUserId) return "You";
+                        const owner = members.find((m) => m.userId === inst.userId);
+                        if (!owner) return "Member";
+                        return owner.user.email ?? owner.user.clerkUserId;
+                      })()}
+                    </span>
+                  </div>
                   <span
                     className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
                       inst.status === "COMPLETED"

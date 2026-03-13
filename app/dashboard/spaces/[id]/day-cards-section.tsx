@@ -1,6 +1,6 @@
 import { completeTaskAction } from "@/app/actions/tasks";
 import { usePersonalForgivenessAction, requestGroupForgivenessAction } from "@/app/actions/forgiveness";
-import type { TaskInstance, SpaceRules } from "@prisma/client";
+import type { TaskInstance, SpaceRules, User } from "@prisma/client";
 import { format } from "date-fns";
 
 export function DayCardsSection({
@@ -9,12 +9,14 @@ export function DayCardsSection({
   instances,
   rules,
   currentUserId,
+  members,
 }: {
   label: string;
   date: Date;
   instances: TaskInstance[];
   rules: SpaceRules | null;
   currentUserId: string;
+  members: { userId: string; user: Pick<User, "email" | "clerkUserId"> }[];
 }) {
   const completed = instances.filter((i) => i.status === "COMPLETED").length;
   const total = instances.length;
@@ -44,8 +46,18 @@ export function DayCardsSection({
             <div>
               <span className="font-medium text-zinc-900 dark:text-zinc-100">{inst.title}</span>
               <span className="ml-2 text-sm text-zinc-500">
-                Risk {inst.stakeAmount} coins if you fail.
+                {inst.userId === currentUserId
+                  ? `Risk ${inst.stakeAmount} coins if you fail.`
+                  : `Risks ${inst.stakeAmount} coins if they fail.`}
               </span>
+              <div className="mt-1 text-xs text-zinc-500">
+                {(() => {
+                  if (inst.userId === currentUserId) return "You";
+                  const owner = members.find((m) => m.userId === inst.userId);
+                  if (!owner) return "Member";
+                  return owner.user.email ?? owner.user.clerkUserId;
+                })()}
+              </div>
             </div>
             <div className="flex gap-2">
               {inst.status === "PENDING" && inst.userId === currentUserId && (
